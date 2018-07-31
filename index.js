@@ -12,17 +12,18 @@ class Task
     constructor(connectionSettings, requestSettings, completeCallback) // Setup properties and send out initial HTTP request
     {
         // Callback methods
-        this.receiveResponse          = this.receiveResponse.bind(this); 
+        this.receiveResponse          = this.receiveResponse.bind(this);
         this.readResponseData         = this.readResponseData.bind(this);
-        this.processResponse          = this.processResponse.bind(this); 
-        this.processParsedResponseXml = this.processParsedResponseXml.bind(this); 
-        this.waitForTaskCompletion    = this.waitForTaskCompletion.bind(this); 
-        this.getTaskStatus            = this.getTaskStatus.bind(this); 
+        this.processResponse          = this.processResponse.bind(this);
+        this.processParsedResponseXml = this.processParsedResponseXml.bind(this);
+        this.waitForTaskCompletion    = this.waitForTaskCompletion.bind(this);
+        this.getTaskStatus            = this.getTaskStatus.bind(this);
         this.downloadResults          = this.downloadResults.bind(this);
-        this.receiveResults           = this.receiveResults.bind(this); 
-        this.processResults           = this.processResults.bind(this); 
-        this.error                    = this.error.bind(this); 
-        this.finish                   = this.finish.bind(this); 
+        this.receiveResults           = this.receiveResults.bind(this);
+        this.readResultsData          = this.readResultsData.bind(this);
+        this.processResults           = this.processResults.bind(this);
+        this.error                    = this.error.bind(this);
+        this.finish                   = this.finish.bind(this);
 
         // Properties
         this.connectionSettings = connectionSettings;
@@ -36,18 +37,18 @@ class Task
         requestOptions.headers = { 'User-Agent': 'node.js client library' };
 
         let request = undefined;
-        if (requestOptions.protocol == 'http:') { request = http.request(requestOptions, this.receiveResponse); } 
+        if (requestOptions.protocol == 'http:') { request = http.request(requestOptions, this.receiveResponse); }
         else { request = https.request(requestOptions, this.receiveResponse); }
-        
+
         request.on('error', this.error);
         if( requestSettings.uploadData ) { request.write(requestSettings.uploadData); }
-        request.end(); 
+        request.end();
     }
 
     receiveResponse(response) // Bind listeners to Abbyy response events
     {
         response.on('data',  this.readResponseData);
-        response.on('end',   this.processResponse); 
+        response.on('end',   this.processResponse);
         response.on('error', this.error);
     }
 
@@ -59,14 +60,14 @@ class Task
     processResponse() // Process Abbyy response
     {
         // Parse XML response and then process it further
-        let parserOptions = 
+        let parserOptions =
         {
             explicitCharKey: false,
             trim: true,
             explicitRoot: true,
-            mergeAttrs: true 
+            mergeAttrs: true
         };
-        
+
         let parser = new xml2js.Parser(parserOptions);
         parser.parseString(this.responseBuffer, this.processParsedResponseXml);
     }
@@ -79,12 +80,12 @@ class Task
         else if( !parsedObj ) { this.error(new Error('Null output from xml2js')); }
         else
         {
-            if( parsedObj.error ) 
+            if( parsedObj.error )
             {
                 // Abbyy server error response
-                this.error(new Error(parsedObj.error.message[0]._)); 
+                this.error(new Error(parsedObj.error.message[0]._));
             }
-            else if( !parsedObj.response || !parsedObj.response.task || !parsedObj.response.task[0] ) 
+            else if( !parsedObj.response || !parsedObj.response.task || !parsedObj.response.task[0] )
             {
                 // Unkown response from Abbyy server
                 this.error(new Error('Unknown server response'));
@@ -97,24 +98,28 @@ class Task
                 if( id.indexOf('00000000') > -1 ) { this.error( new Error('Null id received')); }
                 else
                 {
-                    if( !this.id ) { this.id = id; } // Initialize ID Property 
-                    
+                    if( !this.id ) { this.id = id; } // Initialize ID Property
+
                     if( this.id != id ) { this.error( new Error('Id collision')); }
                     else
                     {
                         let status = taskInfo.status;
-                        if( status == 'Queued' || status == 'InProgress' ) 
+                        if( status == 'Queued' || status == 'InProgress' )
                         {
                             this.waitForTaskCompletion();
                         }
                         else if( status == 'Completed' )
                         {
-                            this.downloadResults(taskInfo.resultUrl[0]);
+                            const resultUrls = [taskInfo.resultUrl[0]];
+                            if (taskInfo.resultUrl2) resultUrls.push(taskInfo.resultUrl2[0]);
+                            if (taskInfo.resultUrl3) resultUrls.push(taskInfo.resultUrl3[0]);
+
+                            this.downloadResults(resultUrls);
                         }
                         else if( status == 'Submitted' )
-                        { 
+                        {
                             this.results = this.id;
-                            this.finish(); 
+                            this.finish();
                         }
                         else { this.error(new Error('Unrecognized task status received')); }
                     }
@@ -137,35 +142,45 @@ class Task
         requestOptions.headers = { 'User-Agent': 'node.js client library' };
 
         let request = undefined;
-        if (requestOptions.protocol == 'http:') { request = http.request(requestOptions, this.receiveResponse); } 
+        if (requestOptions.protocol == 'http:') { request = http.request(requestOptions, this.receiveResponse); }
         else { request = https.request(requestOptions, this.receiveResponse); }
-        
-        request.on('error', this.error);
-        request.end(); 
-    }
-
-    downloadResults(resultsUrl) // Send out HTTP request to download results
-    {
-        let requestOptions = url.parse(resultsUrl); // [TODO] Test if this is always https url anyway
-        let request = undefined;
-        if (requestOptions.protocol == 'http:') { request = http.request(requestOptions, this.receiveResults); } 
-        else { request = https.request(requestOptions, this.receiveResults); }
 
         request.on('error', this.error);
         request.end();
     }
 
-    receiveResults(response)
+    downloadResults(resultsUrls) // Send out HTTP request to download results
     {
-        response.on('data',  this.readResponseData);
-        response.on('end',   this.processResults); 
+        this.results = [];
+        this.finishCount = 0;
+        resultsUrls.forEach((resultsUrl, index) => {
+            this.results.push(Buffer.alloc(0));
+            let requestOptions = url.parse(resultsUrl); // [TODO] Test if this is always https url anyway
+            let request = undefined;
+            if (requestOptions.protocol == 'http:') { request = http.request(requestOptions, this.receiveResults.bind(this, index)); }
+            else { request = https.request(requestOptions, this.receiveResults.bind(this, index)); }
+
+            request.on('error', this.error);
+            request.end();
+        });
+    }
+
+    receiveResults(resultsIndex, response)
+    {
+        response.on('data',  this.readResultsData.bind(this, resultsIndex));
+        response.on('end',   this.processResults);
         response.on('error', this.error);
+    }
+
+    readResultsData(resultsIndex, resultsData)
+    {
+        this.results[resultsIndex] = Buffer.concat([this.results[resultsIndex], resultsData]);
     }
 
     processResults() // Return response (results) directly to user
     {
-        this.results = this.responseBuffer;
-        this.finish(); 
+        this.finishCount += 1;
+        if (this.finishCount === this.results.length) this.finish();
     }
 
     error(error) // Log any errors associated with Task and return it to user
@@ -176,7 +191,7 @@ class Task
 
     finish() // Task complete! Return it to the user
     {
-        this.callback(null, this.results);
+        this.callback(null, this.results.length === 1 ? this.results[0] : this.results);
     }
 }
 
@@ -184,19 +199,19 @@ class AbbyyClient
 {
     constructor(applicationId, password, serverUrl)
     {
-        this.connectionSettings = 
+        this.connectionSettings =
         {
             appId:  applicationId,
             pass:   password,
             svrUrl: serverUrl
         };
     }
-    
-    _toUrlString(parameters) 
+
+    _toUrlString(parameters)
     {
         if( parameters )
         {
-            return '?' + Object.keys(parameters).map((key) => `${key}=${parameters[key]}`).join('&');	
+            return '?' + Object.keys(parameters).map((key) => `${key}=${parameters[key]}`).join('&');
         }
         else { return ''; }
     }
@@ -204,56 +219,56 @@ class AbbyyClient
     _checkArgs(args)
     {
         let parameters = undefined;
-        let uploadData = undefined; 
+        let uploadData = undefined;
 
-        if( args.length == 2 ) 
+        if( args.length == 2 )
         {
             if( Buffer.isBuffer(args[0]) || typeof args[0] == 'string' ) { uploadData =  args[0]; }
             else { parameters = args [0]; }
         }
-        else if( args.length == 3 ) 
+        else if( args.length == 3 )
         {
-            parameters = args[0]; 
-            uploadData = args [1]; 
+            parameters = args[0];
+            uploadData = args [1];
         }
 
         return {parameters: parameters, uploadData: uploadData, userCallback: args[args.length - 1]};
     }
 
-    _runApiMethod(method, parameters, uploadData, userCallback) 
+    _runApiMethod(method, parameters, uploadData, userCallback)
     {
-        if( method == 'processImage'     || 
-            method == 'processTextField' || 
+        if( method == 'processImage'     ||
+            method == 'processTextField' ||
             method == 'processFields'    ||
             method == 'submitImage' )
         {
             // Prepare Upload Data
             let uploadBuffer;
-            if( typeof uploadData == 'string' ) 
-            { 
+            if( typeof uploadData == 'string' )
+            {
                 if( fs.existsSync(uploadData) ) { uploadBuffer = fs.readFileSync(uploadData); }
                 else { userCallback(new Error('File does not exist.')); }
             }
             else { uploadBuffer = uploadData; } // Buffer with data directly passed
 
             // Create new task
-            let requestSettings = 
+            let requestSettings =
             {
                 method: 'POST',
                 urlPathAndQuery: '/' + method + this._toUrlString(parameters),
                 uploadData: uploadBuffer
             };
-            new Task(this.connectionSettings, requestSettings, userCallback); 
+            new Task(this.connectionSettings, requestSettings, userCallback);
         }
         else if ( method == 'processDocument' )
         {
             // Create new task
-            let requestSettings = 
+            let requestSettings =
             {
                 method: 'GET',
                 urlPathAndQuery: '/' + method + this._toUrlString(parameters),
             };
-            new Task(this.connectionSettings, requestSettings, userCallback); 
+            new Task(this.connectionSettings, requestSettings, userCallback);
         }
         else { throw new Error('Invalid API method name'); }
     }
@@ -262,35 +277,35 @@ class AbbyyClient
     /* -------------------- PUBLIC METHODS -------------------- */
     processImage(/* [parameters], [upload data], callback */)
     {
-        let args = this._checkArgs(arguments); 
-        this._runApiMethod('processImage', args.parameters, args.uploadData, args.userCallback); 
+        let args = this._checkArgs(arguments);
+        this._runApiMethod('processImage', args.parameters, args.uploadData, args.userCallback);
     }
 
     processTextField(/* [parameters], [upload data], callback */)
     {
-        let args = this._checkArgs(arguments); 
-        this._runApiMethod('processTextField', args.parameters, args.uploadData, args.userCallback); 
+        let args = this._checkArgs(arguments);
+        this._runApiMethod('processTextField', args.parameters, args.uploadData, args.userCallback);
     }
 
     submitImage(/* [parameters], [upload data], callback */)
     {
-        let args = this._checkArgs(arguments); 
-        this._runApiMethod('submitImage', args.parameters, args.uploadData, args.userCallback); 
+        let args = this._checkArgs(arguments);
+        this._runApiMethod('submitImage', args.parameters, args.uploadData, args.userCallback);
     }
 
     processDocument(/* [parameters], [upload data], callback */)
     {
-        let args = this._checkArgs(arguments); 
-        this._runApiMethod('processDocument', args.parameters, args.uploadData, args.userCallback); 
+        let args = this._checkArgs(arguments);
+        this._runApiMethod('processDocument', args.parameters, args.uploadData, args.userCallback);
     }
-    
+
     processFields(/* [parameters], [upload data], callback */)
     {
-        let args = this._checkArgs(arguments); 
-        this._runApiMethod('processFields', args.parameters, args.uploadData, args.userCallback); 
+        let args = this._checkArgs(arguments);
+        this._runApiMethod('processFields', args.parameters, args.uploadData, args.userCallback);
     }
 }
 
 
 /* -------------------- EXPORT -------------------- */
-module.exports = AbbyyClient; 
+module.exports = AbbyyClient;
